@@ -663,10 +663,10 @@ class Combustible{
 Combustible combustible;
 
 //************************************************************
-RTC_DS1307 rtc;
+
 class Tiempo{
   private:
-
+    RTC_DS1307 rtc;
     String diaStr, mesStr, anioStr;
     String meses[12] = {"Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"};
     String dias[7] = {"Dom", "Lun", "Mar", "Mie", "Jue", "Vie", "Sab"};
@@ -818,12 +818,15 @@ class Tiempo{
 };
 Tiempo tiempo;
 
-volatile int t0 = 0;
-volatile int deltat;
+volatile long t0 = 0, deltat = 0;
+volatile float dist = 0;
+Chrono timerDeltat;
 void delta(){
+  dist = dist + 0.33;    //en mts
   unsigned long t = millis();
   deltat = t - t0;
   t0 = t;
+  timerDeltat.restart();
 }
 
 volatile int cont = 0;
@@ -831,18 +834,20 @@ void incrementar(){
   cont++;
 }
 
-Chrono timerVelocimetro;
 class Velocimetro{
   private:
     float circunferenciaLlanta = 1.34;
     float frecuencia = 0.0;
     float aux = circunferenciaLlanta/2.0;
+    int deltatAux = 0;
+    int kmAux = 1;
 
-    Chrono timerDeltat;
+    Chrono timerVelocimetro;
 
   public:
     //variable[0] en mts, variable[1] en kms
     float distancia[2], velocidad[2], aceleracion[2];
+    bool flagKilometro = false;
 
     void calcularRapido(){
       //vel = frecuencia * circunferencia (m/s)
@@ -858,9 +863,37 @@ class Velocimetro{
       }
     }
 
-    void calculaPreciso(){
-      velocidad[0] = (1000/deltat) * circunferenciaLlanta;    //en m/
-      velocidad[1] = velocidad[0] * 3.6;    //en km/h
+    //250 = 1000ms/4pulsos por vuelta
+    float k = 250.0 * circunferenciaLlanta;
+
+    void calcularPreciso(){
+      if(deltat == 0){
+        velocidad[0] = 0;
+        velocidad[1] = 0;
+      }else{
+        velocidad[0] = k/deltat;    //en mts;
+        velocidad[1] = velocidad[0] * 3.6;    //en km/h
+      }
+
+      //supervision
+      if(timerDeltat.hasPassed(500)){
+          velocidad[0] = 0;
+          velocidad[1] = 0;
+      }
+
+      //distancia
+      distancia[0] = dist;    //en mts
+      distancia[1] = distancia[0]/1000;    //en km
+    }
+
+    void loop(){
+      calcularPreciso();
+
+      //flag nuevo kilometro
+      if((int)distancia[1] == kmAux){
+        kmAux++;
+        flagKilometro = true;
+      }
     }
 };
 Velocimetro velocimetro;
@@ -878,11 +911,62 @@ void filtroRC(int Vin){
   Vout[0] = Vout[1];
 }
 
+class Memoria{
+  private:
+    int dirInicializar = 0;
+    int dirContador = 1;
+    int dirKilometraje = 20;
+    int dirReferenciaKilometros = 40;
+    
+    
+    long referenciaKilometros;
+    long contadorEscritura;
+    float kilometraje;
+
+    float aux;
+    int distanciaInt;
+
+  public:
+
+  int getDirKilometraje(){
+    return dirKilometraje;
+  }
+
+  float getKilometraje(){
+    return kilometraje;
+  }
+
+  void setup(){
+    //EEPROM.update(dirInicializar, (uint8_t)0);
+    byte iniciar = EEPROM.read(dirInicializar);
+    if(iniciar == (byte)0){
+      //inicializar lo demas;
+      EEPROM.put(dirReferenciaKilometros, 1L);
+      EEPROM.put(dirKilometraje, 0.0f);
+      EEPROM.put(dirContador, 0L);
+
+      //finalizar la inicializacion
+      byte init = 1;
+      EEPROM.update(dirInicializar, init);
+    }
+  }
+
+  void loop(){
+    //nuevo kilometro
+    if(velocimetro.flagKilometro){
+      velocimetro.flagKilometro = false;
+      EEPROM.get(dirKilometraje, kilometraje);
+      EEPROM.put(dirKilometraje, kilometraje + 1.0);
+      EEPROM.put(dirContador, contadorEscritura + 1);
+    }
+  }
+};
+Memoria memoria;
+
 const int sensInd = 2;
-Chrono timerSistema;
 class Sistema{
   private:
-
+    Chrono timerSistema;
   public:
     void setup(){
       sr.setup();    //para apagar las salidas primero
@@ -890,10 +974,11 @@ class Sistema{
       pantalla.setup();    //inicializar la lcd
       tiempo.setup();    //inicalizar el RTC
       barra.setup();    //iniciar la barra de estado
+      memoria.setup();
 
       //activar la interrupcion para el velocimetro
       pinMode(sensInd, INPUT);
-      attachInterrupt(digitalPinToInterrupt(sensInd), incrementar, RISING);
+      attachInterrupt(digitalPinToInterrupt(sensInd), delta, RISING);
     }
 
     void loop(){
@@ -905,31 +990,27 @@ class Sistema{
 
         //actualizar el nivel de gas
         combustible.nivel();
-
-        //aplicar el filtro RC
-        filtroRC(combustible.nivelGas);
-        combustible.nivelGas = (int)Vout[1];
-
       }
       //actualizar la velocidad
-      velocimetro.calcularRapido();
-    }
+      velocimetro.loop();
 
-    void memoria(){
-      //usar (int)distancia[1] para que sea en km y solo la parte entera
-      int distKm = (int)velocimetro.distancia[1];
+      //EEPROM
+      memoria.loop();
     }
 };
 Sistema sistema;
 
-Chrono timerUI;
 class InterfazDeUsuario{
   private:
+    Chrono timerUI;
+    float kilometrajeAlIniciar, kilometrajeParaMostrar;
 
   public:
     void setup(){
+      EEPROM.get(memoria.getDirKilometraje(), kilometrajeAlIniciar);
+
       //Texto mamador de inicio
-      pantalla.mostrarTexto("MotoUI v1.0", 1);
+      pantalla.mostrarTexto("MotoUI v1.5", 1);
       pantalla.mostrarTexto("(C)vladeex software", 2);
       delay(1000);
 
@@ -947,19 +1028,23 @@ class InterfazDeUsuario{
 
     if(timerUI.hasPassed(750)){
       timerUI.restart();
+      //detachInterrupt(digitalPinToInterrupt(sensInd));
 
       //mostrar el velocimetro
-      pantalla.extremos((String)velocimetro.velocidad[1] + "km/h", (String)velocimetro.distancia[1] + "km", 1);
+      kilometrajeParaMostrar = kilometrajeAlIniciar + velocimetro.distancia[1];
+      int vel = velocimetro.velocidad[1];
+      pantalla.extremos((String)vel + "km/h", (String)kilometrajeParaMostrar + "km", 1);
 
       //mostrar el combustible
       if(combustible.nivelGas < 10){
         pantalla.flash("Gas: Reserva!", 2);
       }else{
-        pantalla.mostrarTexto("Gas: " + (String)combustible.nivelGas + "%  ", 2);
+        pantalla.mostrarTexto("Gas: " + (String)combustible.nivelGas + "%     ", 2);
       }
 
       //mostrar la hora y fecha
       pantalla.extremos(tiempo.Fecha(3), tiempo.Hora(0), 3);
+      //attachInterrupt(digitalPinToInterrupt(sensInd), delta, RISING);
     }
   }
 };
