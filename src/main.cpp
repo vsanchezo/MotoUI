@@ -2,101 +2,47 @@
 #include "Timemark.h"
 #include <LiquidCrystal_I2C.h>
 #include <RTClib.h>
-#include <SPI.h>
-#include <MFRC522.h>
 #include <Chrono.h>
 #include <EEPROM.h>
+#include <Wire.h>
+#include <PN532_I2C.h>
+#include <PN532.h>
+#include <NfcAdapter.h>
 
 //prototipos de funciones
 void delta(void);
 void filtroRC(int);
 
-//*******************************************************************
-//para el rfid
-#define RST_PIN         9
-#define SS_PIN          10
-MFRC522 mfrc522(SS_PIN, RST_PIN);
+PN532_I2C pn532_i2c(Wire);
+NfcAdapter nfc = NfcAdapter(pn532_i2c);
 
 class RFID{
   private:
-    byte llave1[4] = { 0x09, 0xC9, 0x15, 0xB4 };  // Ejemplo de clave valida
-    byte llave2[4] = {0x99, 0xF0, 0xF6, 0xB9};
-    bool dbg =  false;    //para debug
     
-    //Función para comparar dos vectores
-    bool isEqualArray(byte* arrayA, byte* arrayB, int length)
-    {
-      for (int index = 0; index < length; index++)
-      {
-        if (arrayA[index] != arrayB[index]) return false;
-      }
-      return true;
-    }
 
   public:
-    bool a = false;
+    bool activar = false;
 
     void setup(){
-      SPI.begin();			// Init SPI bus
-      mfrc522.PCD_Init();	
+      nfc.begin();
     }
 
-    void debug(){
-      dbg = true;
 
-      //debug de rfid
-      SPI.begin();			// Init SPI bus
-      mfrc522.PCD_Init();		// Init MFRC522
-      delay(4);				// Optional delay. Some board do need more time after init to be ready, see Readme
-      mfrc522.PCD_DumpVersionToSerial();	// Show details of PCD - MFRC522 Card Reader details
-      Serial.println(F("Scan PICC to see UID, SAK, type, and data blocks..."));
-    }
-
-      bool validar(){
-
-      // Detectar tarjeta
-      if (mfrc522.PICC_IsNewCardPresent())
+    void loop(){
+      if (nfc.tagPresent())
       {
-        //Seleccionamos una tarjeta
-        if (mfrc522.PICC_ReadCardSerial())
-        {
-          // Comparar ID con las claves válidas
-          if (isEqualArray(mfrc522.uid.uidByte, llave1, 4)){
-            Serial.println("Tarjeta valida");
-            a = true;
-          }else if(isEqualArray(mfrc522.uid.uidByte, llave2, 4)){
-            Serial.println("Tarjeta valida");
-            a = true;
-          }else{
-            Serial.println("Tarjeta invalida");
-            a = false;
-          }
-    
-          // Finalizar lectura actual
-          mfrc522.PICC_HaltA();
+        NfcTag tag = nfc.read();
+        //Serial.println("uid: " + tag.getUidString());
+        //tag.print();'
+        if(tag.getUidString() == "09 C9 15 B4"){
+          activar = !activar;
         }
       }
-      return a;
     }
   
-    void infoTarjeta(){
-      // Look for new cards
-      if ( ! mfrc522.PICC_IsNewCardPresent()) {
-        return;
-      }
-
-      // Select one of the cards
-      if ( ! mfrc522.PICC_ReadCardSerial()) {
-        return;
-      }
-
-      // Dump debug info about the card; PICC_HaltA() is automatically called
-      mfrc522.PICC_DumpToSerial(&(mfrc522.uid));
-    }
 };
 RFID rfid;
 
-//*******************************************************************
 //Crear el objeto lcd  dirección  0x27 y 20 columnas y 4 filas
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 Timemark tiempoFlashCorto(400);
@@ -278,28 +224,6 @@ class LCDI2C{
 };
 LCDI2C pantalla;
 
-//*******************************************************************
-//no se implementara antirebote por software porque se usara hardware para resolver ese problema
-class EntradasDigitales{
-  private:
-    byte pin;
-
-  public:
-    //constructor
-    EntradasDigitales(byte pin) {
-      this->pin = pin;
-    }
-
-    void setup(){
-      pinMode(pin, INPUT);
-    }
-
-    int estado(){
-      return digitalRead(pin);
-    }
-};
-
-//*******************************************************************
 class ShiftRegisters{
   private:
     /* data */
@@ -379,7 +303,6 @@ class ShiftRegisters{
 };
 ShiftRegisters sr;
 
-//*************************************************************
 class BarraDeEstado{
   private:
     //Faro
@@ -428,16 +351,17 @@ class BarraDeEstado{
       0b00010
       };
 
-    byte barra[8] = {
-      0b00000,
-      0b00000,
-      0b00000,
-      0b11111,
-      0b11111,
-      0b11111,
-      0b00000,
-      0b00000
+    byte llave[8] = {
+      0b00110,
+      0b00110,
+      0b00100,
+      0b00110,
+      0b00100,
+      0b01110,
+      0b10001,
+      0b01110
     };
+
   //Para cuartos usar P o C
   byte entradasAnterior = 0;
 
@@ -447,7 +371,7 @@ class BarraDeEstado{
       lcd.createChar(4, faroAlto);
       lcd.createChar(5, luzDerecha);
       lcd.createChar(6, luzIzquierda);
-      lcd.createChar(7, barra);
+      lcd.createChar(8, llave);
     }
 
     void mostrar(){
@@ -475,15 +399,23 @@ class BarraDeEstado{
         }
 
         //cuartos
-        lcd.setCursor(6,0);
+        lcd.setCursor(5,0);
         if(sr.cuartos){
           lcd.print("C");
         }else{
           lcd.print(" ");
         }
 
+        //llave
+        lcd.setCursor(9,0);
+        if(rfid.activar){
+          lcd.write(8);
+        }else{
+          lcd.print(" ");
+        }
+
         //bajas
-        lcd.setCursor(12,0);
+        lcd.setCursor(13,0);
         if(sr.bajas){
           lcd.write(3);
         }else{
@@ -491,7 +423,7 @@ class BarraDeEstado{
         }
         
         //altas
-        lcd.setCursor(13,0);
+        lcd.setCursor(14,0);
         if(sr.altas){
           lcd.write(4);
         }
@@ -510,7 +442,6 @@ class Combustible{
     byte bat3[8];
     int nivelAnterior = 0;
     int sensGas = A0;
-    int lectura = 0;
 
     void icono(){
     //crear los caracteres
@@ -623,17 +554,21 @@ class Combustible{
   }
 
   public:
+    int lectura;
     int nivelGas = 0;
+    int nivelLectura;
 
-    //nivel entre 0 y 100
+    //para correccion
+    float factor = 100.0/(460.0-50.0);
+
+    //para el promedio
+    float suma = 0, promedio1 = 0, promedio2 = 0;
+    int contador = 0;
+
     void nivel(){
       lectura = analogRead(sensGas);
-      float nivelF = .0977 * lectura;    //.0977 = 100/1023
-
-      //correccion
-      //lectura = lectura - 500;
-      //float nivelF = .666 * lectura;    //.666 = 100/150
-      nivelGas = (int)nivelF;
+      float porcentaje = (lectura - 50) * factor;
+      nivelGas = porcentaje;
     }
 
     void mostrar(int linea){
@@ -662,8 +597,6 @@ class Combustible{
 };
 Combustible combustible;
 
-//************************************************************
-
 class Tiempo{
   private:
     RTC_DS1307 rtc;
@@ -689,7 +622,7 @@ class Tiempo{
       // rtc.adjust(DateTime(2014, 1, 21, 3, 0, 0));
     }
     //rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-    //rtc.adjust(DateTime(2021, 4, 5, 20, 55, 0));
+    //rtc.adjust(DateTime(2021, 7, 1, 20, 1, 0));
   }
   /*
   * Regresa una string con la fecha
@@ -822,8 +755,9 @@ volatile long t0 = 0, deltat = 0;
 volatile float dist = 0;
 Chrono timerDeltat;
 void delta(){
-  dist = dist + 0.33;    //en mts
-  unsigned long t = millis();
+  dist += 0.335;    //en mts, 1.34/4
+  //unsigned long t = millis();
+  unsigned long t = micros();
   deltat = t - t0;
   t0 = t;
   timerDeltat.restart();
@@ -864,7 +798,8 @@ class Velocimetro{
     }
 
     //250 = 1000ms/4pulsos por vuelta
-    float k = 250.0 * circunferenciaLlanta;
+    //float k = 250.0 * circunferenciaLlanta;
+    float k = 250000.0 * circunferenciaLlanta;    //en us
 
     void calcularPreciso(){
       if(deltat == 0){
@@ -899,7 +834,7 @@ class Velocimetro{
 Velocimetro velocimetro;
 
 float T = 0.1;
-float frecuenciaDeCorte = 0.5;
+float frecuenciaDeCorte = 0.2;
 float Vout[2] = {0.0, 0.0};
 
 float RC = 1.0/(2.0*PI*frecuenciaDeCorte);
@@ -917,7 +852,6 @@ class Memoria{
     int dirContador = 1;
     int dirKilometraje = 20;
     int dirReferenciaKilometros = 40;
-    
     
     long referenciaKilometros;
     long contadorEscritura;
@@ -970,7 +904,7 @@ class Sistema{
   public:
     void setup(){
       sr.setup();    //para apagar las salidas primero
-      rfid.setup();
+      //rfid.setup();
       pantalla.setup();    //inicializar la lcd
       tiempo.setup();    //inicalizar el RTC
       barra.setup();    //iniciar la barra de estado
@@ -991,62 +925,86 @@ class Sistema{
         //actualizar el nivel de gas
         combustible.nivel();
       }
+      
       //actualizar la velocidad
       velocimetro.loop();
 
       //EEPROM
       memoria.loop();
+
+      //RFID
+      /*
+      rfid.loop();
+      if(rfid.activar){
+        sr.encender(1);
+      }else{
+        sr.apagar(1);
+      }
+      */
     }
 };
 Sistema sistema;
 
+//Estadística
+
+//Mantenimiento
+
 class InterfazDeUsuario{
   private:
     Chrono timerUI;
+    Chrono timerUIInicio;
     float kilometrajeAlIniciar, kilometrajeParaMostrar;
+    bool inicio = true;
 
   public:
     void setup(){
       EEPROM.get(memoria.getDirKilometraje(), kilometrajeAlIniciar);
 
       //Texto mamador de inicio
-      pantalla.mostrarTexto("MotoUI v1.5", 1);
-      pantalla.mostrarTexto("(C)vladeex software", 2);
+      pantalla.alinear("MotoUI v1.6", 1, 1);
+      pantalla.alinear("(C)vladeex software", 2, 1);
       delay(1000);
 
       pantalla.mostrarTexto("Iniciemos!", 3);
       delay(500);
-      //while(!rfid.validar());
+      /*
+      while(!rfid.validar());
 
+      //encender salida 1
+      sr.salidas = 1;
+      sr.actualizar(1);
+      */
       //limpiar la pantalla
       lcd.clear();
     }
 
-  void loop(){
-    //mostrar la barra de estado
-    barra.mostrar();
+    void loop()
+    {
+      if (!inicio)
+      {
+        //mostrar la barra de estado
+        barra.mostrar();
 
-    if(timerUI.hasPassed(750)){
-      timerUI.restart();
-      //detachInterrupt(digitalPinToInterrupt(sensInd));
+        if (timerUI.hasPassed(750))
+        {
+          timerUI.restart();
 
-      //mostrar el velocimetro
-      kilometrajeParaMostrar = kilometrajeAlIniciar + velocimetro.distancia[1];
-      int vel = velocimetro.velocidad[1];
-      pantalla.extremos((String)vel + "km/h", (String)kilometrajeParaMostrar + "km", 1);
+          //mostrar el velocimetro
+          kilometrajeParaMostrar = kilometrajeAlIniciar + velocimetro.distancia[1];
+          int vel = velocimetro.velocidad[1];
+          pantalla.extremos((String)vel + "km/h", (String)kilometrajeParaMostrar + "km", 1);
 
-      //mostrar el combustible
-      if(combustible.nivelGas < 10){
-        pantalla.flash("Gas: Reserva!", 2);
-      }else{
-        pantalla.mostrarTexto("Gas: " + (String)combustible.nivelGas + "%     ", 2);
+          //mostrar el combustible
+          filtroRC(combustible.nivelGas);
+          pantalla.extremos("Gas: " + (String)(int)Vout[0] + "%", "Sens: " + (String)combustible.lectura, 2);
+          //pantalla.extremos("Gas: " + (String)(int)combustible.nivelGas + "%", "Sens: " + (String)combustible.lectura, 2);
+          //pantalla.mostrarTexto("Gas: " + (String)combustible.nivelGas + "% R: " + (String)combustible.nivelLectura + "P: " + (String)(int)combustible.promedio, 2);
+
+          //mostrar la hora y fecha
+          pantalla.extremos(tiempo.Fecha(12), tiempo.Hora(0), 3);
+        }
       }
-
-      //mostrar la hora y fecha
-      pantalla.extremos(tiempo.Fecha(3), tiempo.Hora(0), 3);
-      //attachInterrupt(digitalPinToInterrupt(sensInd), delta, RISING);
     }
-  }
 };
 InterfazDeUsuario ui;
 
